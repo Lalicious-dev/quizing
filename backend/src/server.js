@@ -14,10 +14,22 @@ const app = express();
 const httpServer = http.createServer(app);
 
 const allowedOrigins = [
-  process.env.FRONTEND_URL || "http://localhost:5173",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://192.168.1.28:5173",
+  ...(process.env.FRONTEND_URL
+    ? [process.env.FRONTEND_URL]
+    : []),
 ];
 
-app.use(cors({ origin: allowedOrigins }));
+app.use(
+  cors({
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
+
 app.use(express.json());
 
 

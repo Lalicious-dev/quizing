@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import {
   Users,
@@ -22,8 +22,10 @@ import {
 import "./App.css";
 import { io } from "socket.io-client";
 
+const API_URL = `http://${window.location.hostname}:3000`;
+
 const api = axios.create({
-  baseURL: "http://localhost:3000/api",
+  baseURL: `${API_URL}/api`,
 });
 
 function PantallaUnirse() {
@@ -33,7 +35,16 @@ function PantallaUnirse() {
   const [error, setError] = useState("");
   const [partida, setPartida] = useState(null);
   const [participante, setParticipante] = useState(null);
-
+  const [partidaIniciada, setPartidaIniciada] = useState(false);
+  const [preguntaActual, setPreguntaActual] = useState(null);
+  const [opcionSeleccionada, setOpcionSeleccionada] = useState(null);
+  const [enviandoRespuesta, setEnviandoRespuesta] = useState(false);
+  const [resultadoRespuesta, setResultadoRespuesta] = useState(null);
+  const [reactivoIniciadoEn, setReactivoIniciadoEn] = useState(null);
+  const [tiempoRestante, setTiempoRestante] = useState(0);
+  const [partidaFinalizada, setPartidaFinalizada] = useState(false);
+  const [clasificacionFinal, setClasificacionFinal] = useState([]);
+  const reactivoActualRef = useRef(null);
   const unirse = async (e) => {
     e.preventDefault();
     setCargando(true);
@@ -56,10 +67,82 @@ function PantallaUnirse() {
     }
   };
 
+  const enviarRespuesta = async () => {
+    if (
+      !partida ||
+      !participante ||
+      !preguntaActual ||
+      !opcionSeleccionada ||
+      enviandoRespuesta ||
+      tiempoRestante <= 0 ||
+      resultadoRespuesta !== null
+    ) {
+      return;
+    }
+
+    setEnviandoRespuesta(true);
+
+    const reactivoEnviadoId = preguntaActual.id;
+
+    try {
+      const { data } = await api.post(`/partidas/${partida.id}/responder`, {
+        participanteId: participante.id,
+        reactivoId: reactivoEnviadoId,
+        opcionId: opcionSeleccionada,
+      });
+
+      // Mostrar el resultado solo si seguimos en la misma pregunta.
+      if (String(reactivoActualRef.current) === String(reactivoEnviadoId)) {
+        setResultadoRespuesta(data.resultado);
+      }
+    } catch (error) {
+      console.error(
+        "Error al enviar respuesta:",
+        error.response?.data || error.message,
+      );
+
+      const mensaje =
+        error.response?.data?.message ||
+        error.message ||
+        "No se pudo registrar la respuesta.";
+
+      alert(mensaje);
+    } finally {
+      if (String(reactivoActualRef.current) === String(reactivoEnviadoId)) {
+        setEnviandoRespuesta(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!preguntaActual || !reactivoIniciadoEn || partidaFinalizada) {
+      setTiempoRestante(0);
+      return;
+    }
+
+    const inicio = new Date(reactivoIniciadoEn).getTime();
+    const duracion = Number(preguntaActual.tiempo_limite_segundos) * 1000;
+
+    const actualizarTiempo = () => {
+      const restante = Math.max(
+        0,
+        Math.ceil((inicio + duracion - Date.now()) / 1000),
+      );
+
+      setTiempoRestante(restante);
+    };
+
+    actualizarTiempo();
+
+    const intervalo = setInterval(actualizarTiempo, 250);
+
+    return () => clearInterval(intervalo);
+  }, [preguntaActual, reactivoIniciadoEn, partidaFinalizada]);
+
   useEffect(() => {
     if (!partida?.id || !partida?.codigo) return;
 
-    const socket = io("http://localhost:3000");
+    const socket = io(API_URL);
 
     socket.on("connect", () => {
       socket.emit("entrar-sala", {
@@ -67,11 +150,49 @@ function PantallaUnirse() {
       });
     });
 
+    // Recibir la primera pregunta o la siguiente.
+    const recibirPregunta = (data) => {
+      if (String(data.partidaId) !== String(partida.id)) return;
+
+      reactivoActualRef.current = data.pregunta.id;
+
+      setPreguntaActual(data.pregunta);
+      setReactivoIniciadoEn(data.reactivoIniciadoEn);
+      setOpcionSeleccionada(null);
+      setEnviandoRespuesta(false);
+      setResultadoRespuesta(null);
+      setPartidaFinalizada(false);
+      setPartidaIniciada(true);
+    };
+
+    socket.on("partida-iniciada", recibirPregunta);
+    socket.on("reactivo-actualizado", recibirPregunta);
+
+    // Recibir los resultados finales.
+    const recibirFinalizacion = (data) => {
+      if (String(data.partidaId) !== String(partida.id)) return;
+
+      setPartidaFinalizada(true);
+      setClasificacionFinal(data.clasificacion || []);
+      setPreguntaActual(null);
+      setReactivoIniciadoEn(null);
+      reactivoActualRef.current = null;
+    };
+
+    socket.on("partida-finalizada", recibirFinalizacion);
+
     socket.on("error-sala", (data) => {
       setError(data.message || "Error al conectar con la sala.");
     });
 
-    return () => socket.disconnect();
+    // Limpiar listeners y conexión al desmontar.
+    return () => {
+      socket.off("partida-iniciada", recibirPregunta);
+      socket.off("reactivo-actualizado", recibirPregunta);
+      socket.off("partida-finalizada", recibirFinalizacion);
+      socket.off("error-sala");
+      socket.disconnect();
+    };
   }, [partida?.id, partida?.codigo]);
 
   return (
@@ -179,13 +300,113 @@ function PantallaUnirse() {
 
               <h3>{partida.titulo}</h3>
 
-              <div className="lobby-espera">
-                <Users size={30} />
-                <strong>Esperando al anfitrión...</strong>
-                <span>
-                  Cuando comience el juego, aquí continuará tu experiencia.
-                </span>
-              </div>
+              {partidaFinalizada ? (
+                <section className="resultado-respuesta">
+                  <Trophy size={36} />
+
+                  <h2>¡Partida finalizada!</h2>
+                  <p>Esta es la clasificación final.</p>
+
+                  <ol>
+                    {clasificacionFinal.map((jugador, index) => (
+                      <li key={jugador.id}>
+                        <span>
+                          {index + 1}. {jugador.nombre_visible}
+                        </span>
+
+                        <strong>{jugador.puntuacion} puntos</strong>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              ) : partidaIniciada && preguntaActual ? (
+                <section className="pantalla-pregunta">
+                  <p className="eyebrow">¡ES TU TURNO!</p>
+
+                  <h2>{preguntaActual.enunciado}</h2>
+
+                  <div className="temporizador-pregunta">
+                    <Clock3 size={20} />
+
+                    <span>Tiempo restante</span>
+
+                    <strong
+                      className={tiempoRestante <= 5 ? "tiempo-critico" : ""}
+                    >
+                      {tiempoRestante}s
+                    </strong>
+                  </div>
+
+                  <p>
+                    Tiempo límite: {preguntaActual.tiempo_limite_segundos}{" "}
+                    segundos
+                  </p>
+
+                  <div className="opciones-pregunta">
+                    {preguntaActual.opciones.map((opcion) => (
+                      <button
+                        key={opcion.id}
+                        type="button"
+                        className={
+                          opcionSeleccionada === opcion.id
+                            ? "opcion-respuesta seleccionada"
+                            : "opcion-respuesta"
+                        }
+                        onClick={() => setOpcionSeleccionada(opcion.id)}
+                      >
+                        {opcion.texto}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              ) : (
+                <div className="lobby-espera">
+                  <Users size={30} />
+                  <strong>Esperando al anfitrión...</strong>
+                  <span>
+                    Cuando comience el juego, aquí aparecerá la primera
+                    pregunta.
+                  </span>
+                </div>
+              )}
+
+              {!partidaFinalizada && partidaIniciada && preguntaActual && (
+                <>
+                  {!resultadoRespuesta ? (
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={
+                        !opcionSeleccionada ||
+                        enviandoRespuesta ||
+                        tiempoRestante <= 0 ||
+                        resultadoRespuesta !== null
+                      }
+                      onClick={enviarRespuesta}
+                    >
+                      {enviandoRespuesta
+                        ? "Enviando..."
+                        : tiempoRestante <= 0
+                          ? "Tiempo agotado"
+                          : "Confirmar respuesta"}
+                    </button>
+                  ) : (
+                    <section className="resultado-respuesta">
+                      <h3>
+                        {resultadoRespuesta.esCorrecta
+                          ? "¡Correcto! 🎉"
+                          : "Respuesta incorrecta"}
+                      </h3>
+
+                      <p>
+                        Puntos obtenidos: {resultadoRespuesta.puntosObtenidos}
+                      </p>
+
+                      <p>Puntuación total: {resultadoRespuesta.puntuacion}</p>
+                    </section>
+                  )}
+                </>
+              )}
 
               <p className="lobby-codigo">
                 Código: <strong>{partida.codigo}</strong>
@@ -236,9 +457,9 @@ function App() {
   const [error, setError] = useState("");
   const [mensaje, setMensaje] = useState("");
   const [creandoSala, setCreandoSala] = useState(false);
+  const [iniciandoPartida, setIniciandoPartida] = useState(false);
   const [salaActual, setSalaActual] = useState(null);
   const [participantesSala, setParticipantesSala] = useState([]);
-
   const [quizEditando, setQuizEditando] = useState(null);
   const [reactivos, setReactivos] = useState([]);
   const [cargandoEditor, setCargandoEditor] = useState(false);
@@ -279,6 +500,35 @@ function App() {
     setMensaje("");
   };
 
+  const iniciarPartida = async () => {
+    if (!salaActual?.id || iniciandoPartida) return;
+
+    setError("");
+    setMensaje("");
+    setIniciandoPartida(true);
+
+    try {
+      const { data } = await api.post(
+        `/partidas/${salaActual.id}/iniciar`,
+        {},
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        },
+      );
+
+      setSalaActual((actual) => ({
+        ...actual,
+        estado: data.partida.estado,
+      }));
+    } catch (err) {
+      setError(err.response?.data?.message || "No se pudo iniciar la partida.");
+    } finally {
+      setIniciandoPartida(false);
+    }
+  };
+
   const cargarCuestionarios = async (credencial = token) => {
     setCargandoLista(true);
     setError("");
@@ -310,7 +560,7 @@ function App() {
       return;
     }
 
-    const socket = io("http://localhost:3000");
+    const socket = io(API_URL);
 
     socket.on("connect", () => {
       socket.emit("entrar-sala", {
@@ -992,6 +1242,18 @@ function App() {
                       Esperando jugadores
                     </span>
                   </div>
+
+                  <button
+                    className="primary-button"
+                    onClick={iniciarPartida}
+                    disabled={
+                      iniciandoPartida || salaActual.estado !== "esperando"
+                    }
+                  >
+                    {iniciandoPartida
+                      ? "Iniciando partida..."
+                      : "Iniciar partida"}
+                  </button>
 
                   <div className="participantes-sala">
                     <div className="participantes-sala-heading">

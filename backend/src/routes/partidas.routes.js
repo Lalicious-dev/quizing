@@ -1,9 +1,12 @@
-
 import { Router } from "express";
 import { verificarToken } from "../middleware/auth.middleware.js";
-import {  crearSala,
+
+import {
+  crearSala,
   unirsePartida,
-  iniciarPartida, } from "../controllers/partidas.controller.js";
+  iniciarPartida,
+  responderPregunta
+} from "../controllers/partidas.controller.js";
 
 const router = Router();
 
@@ -14,5 +17,5 @@ router.post("/", verificarToken, crearSala);
 router.post("/unirse", unirsePartida);
 
 router.post("/:id/iniciar", verificarToken, iniciarPartida);
-
+router.post("/:id/responder", responderPregunta);
 export default router;
